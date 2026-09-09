@@ -1,4 +1,4 @@
-# Debezium CDC Lab
+# postgresql-debezium-cdc-lab
 
 Hands-on change data capture from PostgreSQL through Debezium, Kafka, Kafka Connect, and a JDBC sink.
 
@@ -84,4 +84,4 @@ Individual checks:
 | `cdc-test.sh` | Runs the insert, Debezium, Kafka, and target checks in order. |
 
 The validation scripts use the existing SSH access and environment-provided database passwords; passwords are not stored in the scripts or printed in output.
-# postgresql-debezium-cdc-lab
+
