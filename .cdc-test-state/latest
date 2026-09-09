@@ -1,5 +1,0 @@
-test_id=CDC_TEST_20260906T155550077630459Z
-test_value=CDC validation CDC_TEST_20260906T155550077630459Z
-timestamp=2026-09-06T15:55:50Z
-timestamp_column=test_timestamp
-table=cdc_test
