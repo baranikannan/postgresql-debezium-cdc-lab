@@ -1,0 +1,21 @@
+---
+postgresql_role: source
+postgresql_enable_logical_replication: true
+postgresql_create_debezium_user: true
+postgresql_create_sink_user: false
+postgresql_database_name: inventory
+postgresql_database_owner: dbzuser
+postgresql_debezium_user: dbzuser
+postgresql_allowed_client_hosts:
+  - 192.168.29.213/32
+postgresql_hba_rules:
+  - type: host
+    database: inventory
+    user: dbzuser
+    address: 192.168.29.213/32
+    method: scram-sha-256
+  - type: host
+    database: replication
+    user: dbzuser
+    address: 192.168.29.213/32
+    method: scram-sha-256

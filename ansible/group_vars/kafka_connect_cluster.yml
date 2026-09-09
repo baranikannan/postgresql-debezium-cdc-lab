@@ -1,0 +1,17 @@
+---
+connect_bootstrap_servers: 192.168.29.212:9092
+connect_listener: "http://0.0.0.0:8083"
+connect_rest_host_name: cdc-connect
+connect_rest_port: 8083
+
+firewalld_allowed_ports:
+  - 8083/tcp
+
+debezium_source_connector_name: inventory-source-connector
+debezium_source_topic_prefix: inventory
+debezium_source_slot_name: debezium_inventory_slot
+debezium_source_publication_name: dbz_publication
+debezium_source_table_include_list: public.cdc_test
+
+jdbc_sink_connector_name: inventory-jdbc-sink
+jdbc_sink_topic_regex: "inventory\\.public\\..*"

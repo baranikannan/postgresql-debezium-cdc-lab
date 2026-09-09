@@ -1,0 +1,255 @@
+---
+- name: Configure PostgreSQL source
+  hosts: postgres_source
+  become: true
+  vars_files:
+    - group_vars/vault.yml
+  roles:
+    - role: common
+    - role: postgresql
+
+- name: Configure PostgreSQL target
+  hosts: postgres_target
+  become: true
+  vars_files:
+    - group_vars/vault.yml
+  roles:
+    - role: common
+    - role: postgresql
+
+- name: Validate remote PostgreSQL connectivity from the Connect node
+  hosts: connect_servers
+  become: true
+  vars_files:
+    - group_vars/vault.yml
+  vars:
+    source_host: "{{ hostvars['cdc-db-source'].ansible_host | default('192.168.29.211') }}"
+    source_db: "{{ hostvars['cdc-db-source'].postgresql_database_name | default('inventory') }}"
+    source_user: "{{ hostvars['cdc-db-source'].postgresql_debezium_user | default('dbzuser') }}"
+    source_password: "{{ vault_postgresql_debezium_password | default('') }}"
+    target_host: "{{ hostvars['cdc-db-target'].ansible_host | default('192.168.29.214') }}"
+    target_db: "{{ hostvars['cdc-db-target'].postgresql_database_name | default('targetdb') }}"
+    target_user: "{{ hostvars['cdc-db-target'].postgresql_sink_user | default('jdbcuser') }}"
+    target_password: "{{ vault_postgresql_sink_password | default('') }}"
+  roles:
+    - role: common
+  tasks:
+    - name: Require vaulted source PostgreSQL credential for remote check
+      ansible.builtin.assert:
+        that:
+          - source_password | length > 0
+        fail_msg: "The source PostgreSQL Vault credential is empty; verify vault_postgresql_debezium_password in group_vars/vault.yml."
+      no_log: true
+
+    - name: Require vaulted target PostgreSQL credential for remote check
+      ansible.builtin.assert:
+        that:
+          - target_password | length > 0
+        fail_msg: "The target PostgreSQL Vault credential is empty; verify vault_postgresql_sink_password in group_vars/vault.yml."
+      no_log: true
+
+    - name: Ensure PostgreSQL client is installed on the Connect node
+      ansible.builtin.package:
+        name: postgresql
+        state: present
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Validate source PostgreSQL remote login from Connect
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/psql
+          - "host={{ source_host }} port=5432 dbname={{ source_db }} user={{ source_user }} sslmode=prefer"
+          - -w
+          - -Atqc
+          - SELECT 1;
+      environment:
+        PGPASSWORD: "{{ source_password }}"
+      register: source_remote_login_check
+      changed_when: false
+      failed_when: >-
+        source_remote_login_check.rc != 0 or
+        source_remote_login_check.stdout.strip() != '1'
+      no_log: false
+
+    - name: Validate target PostgreSQL remote login from Connect
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/psql
+          - "host={{ target_host }} port=5432 dbname={{ target_db }} user={{ target_user }} sslmode=prefer"
+          - -w
+          - -Atqc
+          - SELECT 1;
+      environment:
+        PGPASSWORD: "{{ target_password }}"
+      register: target_remote_login_check
+      changed_when: false
+      failed_when: >-
+        target_remote_login_check.rc != 0 or
+        target_remote_login_check.stdout.strip() != '1'
+      no_log: false
+
+- name: Configure Kafka KRaft
+  hosts: kafka_cluster
+  become: true
+  roles:
+    - role: common
+    - role: kafka
+
+- name: Configure Kafka Connect and plugins
+  hosts: kafka_connect_cluster
+  become: true
+  roles:
+    - role: common
+    - role: kafka_connect
+
+- name: Register and validate Debezium PostgreSQL source connector
+  hosts: kafka_connect_cluster
+  become: true
+  vars_files:
+    - group_vars/vault.yml
+  vars:
+    source_host: "{{ hostvars['cdc-db-source'].ansible_host | default('192.168.29.211') }}"
+    source_db: "{{ hostvars['cdc-db-source'].postgresql_database_name | default('inventory') }}"
+    source_user: "{{ hostvars['cdc-db-source'].postgresql_debezium_user | default('dbzuser') }}"
+    source_password: "{{ vault_postgresql_debezium_password | default('') }}"
+  tasks:
+    - name: Require Debezium source password
+      ansible.builtin.assert:
+        that:
+          - source_password | length > 0
+        fail_msg: "The Debezium source password is empty; verify vault_postgresql_debezium_password."
+      no_log: true
+
+    - name: Check installed Kafka Connect plugins
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ connect_rest_port }}/connector-plugins"
+        method: GET
+        status_code: 200
+        return_content: true
+      register: connect_plugins
+      changed_when: false
+
+    - name: Validate required connector plugins
+      ansible.builtin.assert:
+        that:
+          - connect_plugins.json | selectattr('class', 'equalto', 'io.debezium.connector.postgresql.PostgresConnector') | list | length == 1
+          - connect_plugins.json | selectattr('class', 'search', 'JdbcSinkConnector') | list | length == 1
+        fail_msg: "Required Debezium PostgreSQL and JDBC sink plugins are not both available."
+
+    - name: Register Debezium PostgreSQL source connector
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ connect_rest_port }}/connectors/{{ debezium_source_connector_name }}/config"
+        method: PUT
+        body_format: json
+        body:
+          connector.class: io.debezium.connector.postgresql.PostgresConnector
+          tasks.max: "1"
+          database.hostname: "{{ source_host }}"
+          database.port: "5432"
+          database.user: "{{ source_user }}"
+          database.password: "{{ source_password }}"
+          database.dbname: "{{ source_db }}"
+          topic.prefix: "{{ debezium_source_topic_prefix }}"
+          key.converter: org.apache.kafka.connect.json.JsonConverter
+          key.converter.schemas.enable: "true"
+          value.converter: org.apache.kafka.connect.json.JsonConverter
+          value.converter.schemas.enable: "true"
+          plugin.name: pgoutput
+          slot.name: "{{ debezium_source_slot_name }}"
+          publication.name: "{{ debezium_source_publication_name }}"
+          publication.autocreate.mode: filtered
+          table.include.list: "{{ debezium_source_table_include_list }}"
+          snapshot.mode: initial
+        status_code: [200, 201]
+      register: debezium_source_registration
+      no_log: true
+
+    - name: Validate Debezium source connector status
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ connect_rest_port }}/connectors/{{ debezium_source_connector_name }}/status"
+        method: GET
+        status_code: 200
+        return_content: true
+      register: debezium_source_status
+      changed_when: false
+
+    - name: Assert Debezium source connector is running
+      ansible.builtin.assert:
+        that:
+          - debezium_source_status.json.connector.state == 'RUNNING'
+          - debezium_source_status.json.tasks | length == 1
+          - debezium_source_status.json.tasks[0].state == 'RUNNING'
+        fail_msg: >-
+          Debezium source connector is not running:
+          {{ debezium_source_status.json | to_nice_json }}
+
+- name: Register and validate JDBC target sink connector
+  hosts: kafka_connect_cluster
+  become: true
+  vars_files:
+    - group_vars/vault.yml
+  vars:
+    target_host: "{{ hostvars['cdc-db-target'].ansible_host | default('192.168.29.214') }}"
+    target_db: "{{ hostvars['cdc-db-target'].postgresql_database_name | default('targetdb') }}"
+    target_user: "{{ hostvars['cdc-db-target'].postgresql_sink_user | default('jdbcuser') }}"
+    target_password: "{{ vault_postgresql_sink_password | default('') }}"
+  tasks:
+    - name: Require JDBC sink password
+      ansible.builtin.assert:
+        that:
+          - target_password | length > 0
+        fail_msg: "The JDBC sink password is empty; verify vault_postgresql_sink_password."
+      no_log: true
+
+    - name: Register JDBC target sink connector
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ connect_rest_port }}/connectors/{{ jdbc_sink_connector_name }}/config"
+        method: PUT
+        body_format: json
+        body:
+          connector.class: io.confluent.connect.jdbc.JdbcSinkConnector
+          tasks.max: "1"
+          topics.regex: "{{ jdbc_sink_topic_regex }}"
+          connection.url: "jdbc:postgresql://{{ target_host }}:5432/{{ target_db }}"
+          connection.user: "{{ target_user }}"
+          connection.password: "{{ target_password }}"
+          key.converter: org.apache.kafka.connect.json.JsonConverter
+          key.converter.schemas.enable: "true"
+          value.converter: org.apache.kafka.connect.json.JsonConverter
+          value.converter.schemas.enable: "true"
+          insert.mode: upsert
+          delete.enabled: "true"
+          pk.mode: record_key
+          pk.fields: test_id
+          auto.create: "true"
+          auto.evolve: "true"
+          table.name.format: "${topic}"
+          transforms: unwrap,route
+          transforms.unwrap.type: io.debezium.transforms.ExtractNewRecordState
+          transforms.unwrap.drop.tombstones: "false"
+          transforms.unwrap.delete.handling.mode: rewrite
+          transforms.route.type: org.apache.kafka.connect.transforms.RegexRouter
+          transforms.route.regex: "inventory\\.public\\.(.*)"
+          transforms.route.replacement: "$1"
+        status_code: [200, 201]
+      register: jdbc_sink_registration
+      no_log: true
+
+    - name: Validate JDBC target sink connector status
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ connect_rest_port }}/connectors/{{ jdbc_sink_connector_name }}/status"
+        method: GET
+        status_code: 200
+        return_content: true
+      register: jdbc_sink_status
+      changed_when: false
+
+    - name: Assert JDBC target sink connector is running
+      ansible.builtin.assert:
+        that:
+          - jdbc_sink_status.json.connector.state == 'RUNNING'
+          - jdbc_sink_status.json.tasks | length == 1
+          - jdbc_sink_status.json.tasks[0].state == 'RUNNING'
+        fail_msg: >-
+          JDBC target sink connector is not running:
+          {{ jdbc_sink_status.json | to_nice_json }}

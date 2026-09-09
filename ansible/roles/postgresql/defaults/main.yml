@@ -1,0 +1,49 @@
+---
+postgresql_role: source
+postgresql_version_major: 16
+postgresql_version: "16"
+postgresql_service_name: "postgresql-{{ postgresql_version }}"
+postgresql_data_dir: "/var/lib/pgsql/{{ postgresql_version }}/data"
+postgresql_bin_dir: "/usr/pgsql-{{ postgresql_version }}/bin"
+postgresql_config_dir: "{{ postgresql_data_dir }}"
+postgresql_port: 5432
+postgresql_listen_addresses: "*"
+postgresql_expected_hostname: "{{ hostname | default(inventory_hostname) }}"
+postgresql_expected_ipv4: "{{ ansible_host | default('') }}"
+postgresql_router_address: 192.168.29.1
+postgresql_dns_test_name: download.postgresql.org
+postgresql_max_connections: 200
+postgresql_timezone: UTC
+postgresql_logging_collector: "on"
+postgresql_log_directory: log
+postgresql_log_filename: postgresql-%a.log
+postgresql_wal_level: "{{ 'logical' if postgresql_enable_logical_replication else 'replica' }}"
+postgresql_max_wal_senders: "{{ 10 if postgresql_enable_logical_replication else 0 }}"
+postgresql_max_replication_slots: "{{ 10 if postgresql_enable_logical_replication else 0 }}"
+postgresql_shared_preload_libraries: ""
+
+postgresql_enable_logical_replication: false
+postgresql_create_debezium_user: false
+postgresql_create_sink_user: false
+postgresql_create_database: true
+postgresql_database_owner: postgres
+postgresql_create_schemas: false
+postgresql_schemas: []
+
+postgresql_database_name: inventory
+postgresql_debezium_user: dbzuser
+postgresql_debezium_password: ""
+postgresql_sink_user: jdbcuser
+postgresql_sink_password: ""
+postgresql_allowed_client_hosts:
+  - 192.168.29.213/32
+
+postgresql_hba_rules:
+  - type: host
+    database: all
+    user: all
+    address: "{{ postgresql_allowed_client_hosts | first }}"
+    method: scram-sha-256
+
+pgdg_rhel9_repo_url: https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+pgdg_rhel9_gpg_key_url: https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-RHEL

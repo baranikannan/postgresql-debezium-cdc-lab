@@ -1,0 +1,9 @@
+---
+ansible_host: 192.168.29.212
+hostname: cdc-kafka
+
+kafka_node_id: 1
+kafka_listener_name: PLAINTEXT
+kafka_host_name: cdc-kafka
+kafka_advertised_listener: PLAINTEXT://cdc-kafka:9092
+kafka_controller_quorum_voters: "1@cdc-kafka:9093"

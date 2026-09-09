@@ -1,0 +1,6 @@
+# Managed by Ansible. Local administrative access remains peer authenticated.
+local   all             postgres                                peer
+local   all             all                                     peer
+{% for rule in postgresql_hba_rules %}
+{{ '%-7s %-15s %-31s %-24s %s' | format(rule.type, rule.database, rule.user, rule.address, rule.method) }}
+{% endfor %}

@@ -1,0 +1,44 @@
+---
+# Common lab defaults
+ansible_python_interpreter: /usr/libexec/platform-python
+common_packages:
+  - curl
+  - wget
+  - unzip
+  - tar
+  - git
+  - jq
+  - net-tools
+  - bind-utils
+  - ca-certificates
+  - firewalld
+  - policycoreutils-python-utils
+  - python3-libselinux
+  - python3-policycoreutils
+  - bash-completion
+
+ntp_enabled: false
+timezone: UTC
+
+firewalld_enabled: true
+firewalld_default_zone: public
+firewalld_managed_ports:
+  - 5432/tcp
+  - 9092/tcp
+  - 9093/tcp
+  - 8083/tcp
+firewalld_allowed_ports: []
+
+selinux_mode: permissive
+selinux_policy: targeted
+
+# Host entries
+etc_hosts_entries:
+  - ip: 192.168.29.211
+    host: cdc-db-source
+  - ip: 192.168.29.212
+    host: cdc-kafka
+  - ip: 192.168.29.213
+    host: cdc-connect
+  - ip: 192.168.29.214
+    host: cdc-db-target

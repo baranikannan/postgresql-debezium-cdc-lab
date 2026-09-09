@@ -1,0 +1,34 @@
+---
+kafka_version: "4.3.1"
+kafka_scala_version: "2.13"
+kafka_home: /opt/kafka
+kafka_log_dir: /var/lib/kafka-logs
+kafka_user: kafka
+kafka_group: kafka
+kafka_service_name: kafka-kraft
+
+java_version: 17
+
+kafka_port: 9092
+kafka_controller_port: 9093
+kafka_node_id: 1
+kafka_cluster_id: "M6dZKcIpQ7yVSpmQZc1BfA"
+kafka_controller_quorum_voters: "1@cdc-kafka:9093"
+kafka_listeners:
+  - "PLAINTEXT://0.0.0.0:9092"
+  - "CONTROLLER://0.0.0.0:9093"
+
+kafka_advertised_listeners:
+  - "PLAINTEXT://{{ ansible_host }}:9092"
+
+kafka_offsets_topic_replication_factor: 1
+kafka_transaction_state_log_replication_factor: 1
+kafka_transaction_state_log_min_isr: 1
+kafka_default_replication_factor: 1
+kafka_min_in_sync_replicas: 1
+
+kafka_heap_opts: "-Xmx1G -Xms512M"
+
+firewalld_allowed_ports:
+  - 9092/tcp
+  - 9093/tcp

@@ -1,0 +1,3 @@
+---
+ansible_host: 192.168.29.214
+hostname: cdc-db-target

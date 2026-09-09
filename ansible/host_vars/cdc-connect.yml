@@ -1,0 +1,7 @@
+---
+ansible_host: 192.168.29.213
+hostname: cdc-connect
+
+connect_listener: "http://0.0.0.0:8083"
+connect_rest_host_name: cdc-connect
+connect_bootstrap_servers: "cdc-kafka:9092"

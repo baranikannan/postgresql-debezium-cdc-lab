@@ -1,0 +1,56 @@
+---
+- name: Set system hostname
+  ansible.builtin.hostname:
+    name: "{{ hostname | default(inventory_hostname) }}"
+
+- name: Install base packages
+  ansible.builtin.package:
+    name: "{{ common_packages }}"
+    state: present
+
+- name: Ensure /etc/hosts contains all lab entries
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    create: true
+    mode: '0644'
+    regexp: "^{{ item.ip }}\\s+{{ item.host }}"
+    line: "{{ item.ip }} {{ item.host }}"
+  loop: "{{ etc_hosts_entries }}"
+
+- name: Configure SELinux mode
+  ansible.builtin.selinux:
+    state: "{{ selinux_mode }}"
+    policy: "{{ selinux_policy }}"
+
+- name: Ensure firewalld is running
+  ansible.builtin.service:
+    name: firewalld
+    state: started
+    enabled: true
+  when: firewalld_enabled | bool
+
+- name: Remove CDC ports that are not allowed on this node
+  ansible.builtin.firewalld:
+    port: "{{ item }}"
+    permanent: true
+    immediate: true
+    state: disabled
+    zone: "{{ firewalld_default_zone }}"
+  loop: "{{ firewalld_managed_ports | difference(firewalld_allowed_ports) }}"
+  when: firewalld_enabled | bool
+
+- name: Allow required CDC ports on this node
+  ansible.builtin.firewalld:
+    port: "{{ item }}"
+    permanent: true
+    immediate: true
+    state: enabled
+    zone: "{{ firewalld_default_zone }}"
+  loop: "{{ firewalld_allowed_ports }}"
+  when: firewalld_enabled | bool
+
+- name: Reload firewalld after CDC port changes
+  ansible.builtin.service:
+    name: firewalld
+    state: reloaded
+  when: firewalld_enabled | bool

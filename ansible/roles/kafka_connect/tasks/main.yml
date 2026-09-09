@@ -1,0 +1,152 @@
+---
+- name: Import official CentOS Stream signing key
+  ansible.builtin.rpm_key:
+    key: "{{ kafka_centos_gpg_key_url }}"
+    state: present
+
+- name: Install Java 17 OpenJDK package
+  ansible.builtin.dnf:
+    name: java-17-openjdk
+    state: present
+    update_cache: false
+    use_backend: dnf
+    lock_timeout: 120
+
+- name: Validate active Java version
+  ansible.builtin.command:
+    cmd: java -version
+  register: kafka_java_version
+  changed_when: false
+  failed_when:
+    - kafka_java_version.rc != 0
+    - "'version \"17.' not in kafka_java_version.stderr"
+
+- name: Ensure Kafka Connect group exists
+  ansible.builtin.group:
+    name: "{{ connect_group }}"
+    state: present
+
+- name: Ensure Kafka Connect user exists
+  ansible.builtin.user:
+    name: "{{ connect_user }}"
+    group: "{{ connect_group }}"
+    system: true
+    shell: /sbin/nologin
+    create_home: false
+
+- name: Create Kafka Connect directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ connect_user }}"
+    group: "{{ connect_group }}"
+    mode: "0755"
+  loop:
+    - "{{ connect_home }}"
+    - "{{ connect_plugin_path }}"
+
+- name: Copy Debezium connector archive to target
+  ansible.builtin.copy:
+    src: "debezium-connector-postgres-{{ connect_debezium_version }}-plugin.tar.gz"
+    dest: "/tmp/debezium-connector-postgres-{{ connect_debezium_version }}-plugin.tar.gz"
+    mode: "0644"
+
+- name: Copy Kafka Connect JDBC connector archive to target
+  ansible.builtin.copy:
+    src: "confluentinc-kafka-connect-jdbc-{{ connect_jdbc_version }}.zip"
+    dest: "/tmp/kafka-connect-jdbc-{{ connect_jdbc_version }}.zip"
+    mode: "0644"
+
+- name: Copy PostgreSQL JDBC driver to target
+  ansible.builtin.copy:
+    src: "postgresql-{{ postgresql_jdbc_driver_version }}.jar"
+    dest: "/tmp/postgresql-{{ postgresql_jdbc_driver_version }}.jar"
+    mode: "0644"
+
+- name: Copy Kafka distribution for Connect to target
+  ansible.builtin.copy:
+    src: "kafka_{{ kafka_scala_version }}-{{ kafka_version }}.tgz"
+    dest: "/tmp/kafka_{{ kafka_scala_version }}-{{ kafka_version }}.tgz"
+    mode: "0644"
+
+- name: Extract Kafka Connect distribution
+  ansible.builtin.unarchive:
+    src: "/tmp/kafka_{{ kafka_scala_version }}-{{ kafka_version }}.tgz"
+    dest: "{{ connect_home }}"
+    remote_src: true
+    extra_opts:
+      - --strip-components=1
+    owner: "{{ connect_user }}"
+    group: "{{ connect_group }}"
+    creates: "{{ connect_home }}/bin/connect-distributed.sh"
+
+- name: Extract Debezium plugins
+  ansible.builtin.unarchive:
+    src: "/tmp/debezium-connector-postgres-{{ connect_debezium_version }}-plugin.tar.gz"
+    dest: "{{ connect_plugin_path }}"
+    remote_src: true
+    owner: "{{ connect_user }}"
+    group: "{{ connect_group }}"
+
+- name: Extract Kafka Connect JDBC plugin
+  ansible.builtin.unarchive:
+    src: "/tmp/kafka-connect-jdbc-{{ connect_jdbc_version }}.zip"
+    dest: "{{ connect_plugin_path }}"
+    remote_src: true
+    owner: "{{ connect_user }}"
+    group: "{{ connect_group }}"
+
+- name: Install PostgreSQL JDBC driver
+  ansible.builtin.copy:
+    src: "/tmp/postgresql-{{ postgresql_jdbc_driver_version }}.jar"
+    dest: "{{ connect_jdbc_plugin_dir }}/lib/postgresql-{{ postgresql_jdbc_driver_version }}.jar"
+    remote_src: true
+    owner: "{{ connect_user }}"
+    group: "{{ connect_group }}"
+    mode: "0644"
+
+- name: Render Kafka Connect configuration
+  ansible.builtin.template:
+    src: connect-distributed.properties.j2
+    dest: "{{ connect_home }}/config/connect-distributed.properties"
+    owner: "{{ connect_user }}"
+    group: "{{ connect_group }}"
+    mode: "0644"
+
+- name: Render Connect systemd unit
+  ansible.builtin.template:
+    src: kafka-connect.service.j2
+    dest: "/etc/systemd/system/{{ connect_service_name }}.service"
+    mode: "0644"
+
+- name: Enable and start Connect service
+  ansible.builtin.systemd:
+    daemon_reload: true
+    name: "{{ connect_service_name }}"
+    state: started
+    enabled: true
+
+- name: Validate Kafka Connect service is active
+  ansible.builtin.command:
+    cmd: "systemctl is-active {{ connect_service_name }}"
+  register: connect_service_check
+  changed_when: false
+  retries: 24
+  delay: 5
+  until:
+    - connect_service_check.rc == 0
+    - connect_service_check.stdout.strip() == "active"
+
+- name: Validate Kafka Connect REST endpoint
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ connect_rest_port }}"
+    state: started
+    timeout: 120
+
+- name: Query Kafka Connect REST endpoint
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ connect_rest_port }}/"
+    method: GET
+    status_code: 200
+    timeout: 30

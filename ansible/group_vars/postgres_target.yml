@@ -1,0 +1,16 @@
+---
+postgresql_role: target
+postgresql_enable_logical_replication: false
+postgresql_create_debezium_user: false
+postgresql_create_sink_user: true
+postgresql_database_name: targetdb
+postgresql_database_owner: jdbcuser
+postgresql_sink_user: jdbcuser
+postgresql_allowed_client_hosts:
+  - 192.168.29.213/32
+postgresql_hba_rules:
+  - type: host
+    database: targetdb
+    user: jdbcuser
+    address: 192.168.29.213/32
+    method: scram-sha-256

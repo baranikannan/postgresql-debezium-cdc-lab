@@ -1,0 +1,17 @@
+[Unit]
+Description=Kafka Connect Distributed
+After=network.target
+
+[Service]
+Type=simple
+User={{ connect_user }}
+Group={{ connect_group }}
+Environment="KAFKA_HEAP_OPTS=-Xmx1G -Xms512M"
+ExecStart={{ connect_home }}/bin/connect-distributed.sh {{ connect_home }}/config/connect-distributed.properties
+ExecStop=/bin/kill -TERM $MAINPID
+Restart=on-failure
+RestartSec=5
+WorkingDirectory={{ connect_home }}
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,152 @@
+---
+- name: Import official CentOS Stream signing key
+  ansible.builtin.rpm_key:
+    key: "{{ kafka_centos_gpg_key_url }}"
+    state: present
+
+- name: Install Java 17 OpenJDK package
+  ansible.builtin.dnf:
+    name: java-17-openjdk
+    state: present
+    update_cache: true
+    use_backend: dnf
+    lock_timeout: 120
+
+- name: Validate active Java version
+  ansible.builtin.command:
+    cmd: java -version
+  register: kafka_java_version
+  changed_when: false
+  failed_when:
+    - kafka_java_version.rc != 0
+    - "'version \"17.' not in kafka_java_version.stderr"
+
+- name: Create Kafka user and group
+  ansible.builtin.group:
+    name: "{{ kafka_group }}"
+    state: present
+
+- name: Ensure Kafka user exists
+  ansible.builtin.user:
+    name: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    system: true
+    shell: /bin/bash
+    create_home: false
+
+- name: Download Kafka binary distribution
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/curl
+      - --fail
+      - --location
+      - --retry
+      - "3"
+      - --retry-delay
+      - "10"
+      - --connect-timeout
+      - "30"
+      - --max-time
+      - "{{ kafka_download_timeout }}"
+      - --output
+      - "/tmp/kafka_{{ kafka_scala_version }}-{{ kafka_version }}.tgz.part"
+      - "{{ kafka_download_url }}"
+    creates: "/tmp/kafka_{{ kafka_scala_version }}-{{ kafka_version }}.tgz"
+  register: kafka_download
+  retries: 3
+  delay: 10
+  until: kafka_download is succeeded
+
+- name: Finalize Kafka binary distribution download
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/mv
+      - "/tmp/kafka_{{ kafka_scala_version }}-{{ kafka_version }}.tgz.part"
+      - "/tmp/kafka_{{ kafka_scala_version }}-{{ kafka_version }}.tgz"
+    creates: "/tmp/kafka_{{ kafka_scala_version }}-{{ kafka_version }}.tgz"
+
+- name: Ensure Kafka installation directory exists
+  ansible.builtin.file:
+    path: "{{ kafka_home }}"
+    state: directory
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: '0755'
+
+- name: Extract Kafka distribution
+  ansible.builtin.unarchive:
+    src: "/tmp/kafka_{{ kafka_scala_version }}-{{ kafka_version }}.tgz"
+    dest: "{{ kafka_home }}"
+    remote_src: true
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    extra_opts:
+      - --strip-components=1
+    creates: "{{ kafka_home }}/bin/kafka-server-start.sh"
+
+- name: Ensure Kafka config directory exists
+  ansible.builtin.file:
+    path: "{{ kafka_home }}/config"
+    state: directory
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: "0755"
+
+- name: Ensure data directory exists
+  ansible.builtin.file:
+    path: "{{ kafka_log_dir }}"
+    state: directory
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: '0755'
+
+- name: Render Kafka server.properties
+  ansible.builtin.template:
+    src: server.properties.j2
+    dest: "{{ kafka_home }}/config/server.properties"
+    owner: "{{ kafka_user }}"
+    group: "{{ kafka_group }}"
+    mode: '0644'
+
+- name: Render Kafka systemd unit
+  ansible.builtin.template:
+    src: kafka-kraft.service.j2
+    dest: /etc/systemd/system/kafka-kraft.service
+    mode: '0644'
+
+- name: Format Kafka KRaft storage if not already formatted
+  ansible.builtin.command:
+    cmd: >-
+      {{ kafka_home }}/bin/kafka-storage.sh format
+      -t {{ kafka_cluster_id }}
+      -c {{ kafka_home }}/config/server.properties
+      --ignore-formatted
+  args:
+    creates: "{{ kafka_log_dir }}/meta.properties"
+  become_user: "{{ kafka_user }}"
+
+- name: Reload systemd and enable Kafka service
+  ansible.builtin.systemd:
+    daemon_reload: true
+    name: kafka-kraft
+    enabled: true
+    state: started
+
+- name: Validate Kafka broker port
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ kafka_port }}"
+    timeout: 30
+
+- name: Validate Kafka controller port
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ kafka_controller_port }}"
+    timeout: 30
+
+- name: Validate Kafka service is active
+  ansible.builtin.command:
+    cmd: systemctl is-active {{ kafka_service_name }}
+  register: kafka_service_check
+  changed_when: false
+  failed_when: kafka_service_check.stdout.strip() != 'active'

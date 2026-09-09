@@ -1,0 +1,15 @@
+---
+postgresql_version_major: 16
+postgresql_version: "16"
+postgresql_port: 5432
+postgresql_listen_addresses: "*"
+postgresql_max_connections: 200
+postgresql_create_database: true
+postgresql_database_name: inventory
+
+# Values are defined in the encrypted vars file.
+postgresql_debezium_password: "{{ vault_postgresql_debezium_password | default('') }}"
+postgresql_sink_password: "{{ vault_postgresql_sink_password | default('') }}"
+
+firewalld_allowed_ports:
+  - 5432/tcp

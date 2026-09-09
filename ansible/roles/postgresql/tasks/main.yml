@@ -1,0 +1,396 @@
+---
+- name: Validate expected hostname
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.hostname == postgresql_expected_hostname
+    fail_msg: "Expected hostname {{ postgresql_expected_hostname }}, found {{ ansible_facts.hostname }}."
+
+- name: Validate expected static IPv4 address
+  ansible.builtin.assert:
+    that:
+      - postgresql_expected_ipv4 | length > 0
+      - postgresql_expected_ipv4 in ansible_facts.all_ipv4_addresses
+    fail_msg: "Expected {{ postgresql_expected_ipv4 }} is not configured on this host."
+
+- name: Validate connectivity to the lab router
+  ansible.builtin.wait_for:
+    host: "{{ postgresql_router_address }}"
+    port: 53
+    timeout: 5
+
+- name: Validate DNS resolution
+  ansible.builtin.getent:
+    database: hosts
+    key: "{{ postgresql_dns_test_name }}"
+
+- name: Validate Internet access to the PGDG endpoint
+  ansible.builtin.uri:
+    url: "{{ pgdg_rhel9_repo_url }}"
+    method: HEAD
+    status_code: 200
+    timeout: 15
+
+- name: Confirm EL9-compatible operating system
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.os_family == 'RedHat'
+      - ansible_facts.distribution_major_version | int == 9
+      - postgresql_role in ['source', 'target']
+    fail_msg: PostgreSQL requires an EL9-compatible host and postgresql_role must be source or target.
+
+- name: Install PGDG repository prerequisites
+  ansible.builtin.dnf:
+    name:
+      - ca-certificates
+      - dnf-plugins-core
+      - python3-psycopg2
+    state: present
+
+- name: Import official PostgreSQL PGDG signing key
+  ansible.builtin.rpm_key:
+    key: "{{ pgdg_rhel9_gpg_key_url }}"
+    state: present
+
+- name: Install official PostgreSQL PGDG EL9 repository
+  ansible.builtin.dnf:
+    name: "{{ pgdg_rhel9_repo_url }}"
+    state: present
+    disable_gpg_check: false
+
+- name: Refresh DNF metadata
+  ansible.builtin.dnf:
+    update_cache: true
+
+- name: Check PostgreSQL 16 server package availability
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/dnf
+      - repoquery
+      - --available
+      - --qf
+      - "%{name}"
+      - "postgresql{{ postgresql_version }}-server"
+  register: postgresql_package_check
+  changed_when: false
+  failed_when: >-
+    postgresql_package_check.rc != 0 or
+    ('postgresql' ~ postgresql_version ~ '-server') not in postgresql_package_check.stdout_lines
+
+- name: Fail when PostgreSQL 16 is unavailable
+  ansible.builtin.fail:
+    msg: "PostgreSQL {{ postgresql_version }} package postgresql{{ postgresql_version }}-server is unavailable from the configured PGDG EL9 repositories."
+  when: ("postgresql" ~ postgresql_version ~ "-server") not in postgresql_package_check.stdout_lines
+
+- name: Install PostgreSQL 16 server and client packages
+  ansible.builtin.dnf:
+    name:
+      - "postgresql{{ postgresql_version }}-server"
+      - "postgresql{{ postgresql_version }}"
+      - "postgresql{{ postgresql_version }}-contrib"
+    state: present
+
+- name: Initialize PostgreSQL data directory
+  ansible.builtin.command:
+    cmd: "{{ postgresql_bin_dir }}/postgresql-{{ postgresql_version }}-setup initdb"
+    creates: "{{ postgresql_data_dir }}/PG_VERSION"
+
+- name: Configure PostgreSQL connection and replication settings
+  ansible.builtin.lineinfile:
+    path: "{{ postgresql_config_dir }}/postgresql.conf"
+    regexp: "^#?{{ item.key }}\\s*=.*$"
+    line: "{{ item.key }} = {{ item.value }}"
+    owner: postgres
+    group: postgres
+    mode: "0600"
+  loop:
+    - key: listen_addresses
+      value: "'{{ postgresql_listen_addresses }}'"
+    - key: port
+      value: "{{ postgresql_port }}"
+    - key: max_connections
+      value: "{{ postgresql_max_connections }}"
+    - key: wal_level
+      value: "{{ postgresql_wal_level }}"
+    - key: max_wal_senders
+      value: "{{ postgresql_max_wal_senders }}"
+    - key: max_replication_slots
+      value: "{{ postgresql_max_replication_slots }}"
+    - key: shared_preload_libraries
+      value: "'{{ postgresql_shared_preload_libraries }}'"
+    - key: timezone
+      value: "'{{ postgresql_timezone }}'"
+    - key: logging_collector
+      value: "{{ postgresql_logging_collector }}"
+    - key: log_directory
+      value: "'{{ postgresql_log_directory }}'"
+    - key: log_filename
+      value: "'{{ postgresql_log_filename }}'"
+  notify: Restart PostgreSQL
+
+- name: Manage pg_hba.conf declaratively
+  ansible.builtin.template:
+    src: pg_hba.conf.j2
+    dest: "{{ postgresql_config_dir }}/pg_hba.conf"
+    owner: postgres
+    group: postgres
+    mode: "0600"
+  notify: Reload PostgreSQL
+
+- name: Enable and start PostgreSQL
+  ansible.builtin.service:
+    name: "{{ postgresql_service_name }}"
+    state: started
+    enabled: true
+
+- name: Flush PostgreSQL handlers before database operations
+  ansible.builtin.meta: flush_handlers
+
+- name: Create configured database
+  community.postgresql.postgresql_db:
+    name: "{{ postgresql_database_name }}"
+    encoding: UTF-8
+    template: template0
+    state: present
+  become: true
+  become_user: postgres
+  when: postgresql_create_database
+
+- name: Require a Debezium password when its user is enabled
+  ansible.builtin.assert:
+    that:
+      - postgresql_debezium_password | length > 0
+    fail_msg: Define postgresql_debezium_password through Ansible Vault.
+  when: postgresql_create_debezium_user
+
+- name: Require a sink password when its user is enabled
+  ansible.builtin.assert:
+    that:
+      - postgresql_sink_password | length > 0
+    fail_msg: Define postgresql_sink_password through Ansible Vault.
+  when: postgresql_create_sink_user
+
+- name: Create Debezium source user
+  community.postgresql.postgresql_user:
+    name: "{{ postgresql_debezium_user }}"
+    password: "{{ postgresql_debezium_password }}"
+    role_attr_flags: LOGIN,REPLICATION
+    state: present
+  become: true
+  become_user: postgres
+  no_log: true
+  when: postgresql_create_debezium_user
+
+- name: Grant Debezium access to the source database
+  community.postgresql.postgresql_privs:
+    database: "{{ postgresql_database_name }}"
+    roles: "{{ postgresql_debezium_user }}"
+    type: database
+    objs: "{{ postgresql_database_name }}"
+    privs: CONNECT
+    state: present
+  become: true
+  become_user: postgres
+  when:
+    - postgresql_create_debezium_user
+    - postgresql_create_database
+
+- name: Grant Debezium read access to the source schema and tables
+  community.postgresql.postgresql_privs:
+    database: "{{ postgresql_database_name }}"
+    roles: "{{ postgresql_debezium_user }}"
+    type: "{{ item.type }}"
+    objs: "{{ item.objs }}"
+    schema: "{{ item.schema | default(omit) }}"
+    privs: "{{ item.privs }}"
+    state: present
+  loop:
+    - type: schema
+      objs: public
+      privs: USAGE
+    - type: table
+      objs: ALL_IN_SCHEMA
+      schema: public
+      privs: SELECT
+  become: true
+  become_user: postgres
+  when:
+    - postgresql_create_debezium_user
+    - postgresql_create_database
+
+- name: Create JDBC sink user
+  community.postgresql.postgresql_user:
+    name: "{{ postgresql_sink_user }}"
+    password: "{{ postgresql_sink_password }}"
+    role_attr_flags: LOGIN
+    state: present
+  become: true
+  become_user: postgres
+  no_log: true
+  when: postgresql_create_sink_user
+
+- name: Configure database owner
+  community.postgresql.postgresql_db:
+    name: "{{ postgresql_database_name }}"
+    owner: "{{ postgresql_database_owner }}"
+    state: present
+  become: true
+  become_user: postgres
+  when: postgresql_create_database
+
+- name: Create configured database schemas
+  community.postgresql.postgresql_schema:
+    database: "{{ postgresql_database_name }}"
+    name: "{{ item }}"
+    owner: "{{ postgresql_database_owner }}"
+    state: present
+  loop: "{{ postgresql_schemas }}"
+  become: true
+  become_user: postgres
+  when:
+    - postgresql_create_database
+    - postgresql_create_schemas
+
+- name: Grant JDBC sink database and schema privileges
+  community.postgresql.postgresql_privs:
+    database: "{{ postgresql_database_name }}"
+    roles: "{{ postgresql_sink_user }}"
+    type: "{{ item.type }}"
+    objs: "{{ item.objs }}"
+    schema: "{{ item.schema | default(omit) }}"
+    privs: "{{ item.privs }}"
+    state: present
+  loop:
+    - type: database
+      objs: "{{ postgresql_database_name }}"
+      privs: CONNECT
+    - type: schema
+      objs: public
+      privs: USAGE,CREATE
+    - type: table
+      objs: ALL_IN_SCHEMA
+      schema: public
+      privs: SELECT,INSERT,UPDATE,DELETE
+  become: true
+  become_user: postgres
+  when:
+    - postgresql_create_sink_user
+    - postgresql_create_database
+
+- name: Collect installed PostgreSQL package facts
+  ansible.builtin.package_facts:
+    manager: auto
+
+- name: Validate PostgreSQL 16 package is installed
+  ansible.builtin.assert:
+    that: >
+      ('postgresql' ~ postgresql_version ~ '-server') in ansible_facts.packages
+    fail_msg: PostgreSQL 16 server package is not installed.
+
+- name: Validate PostgreSQL service is active
+  ansible.builtin.command:
+    cmd: "systemctl is-active {{ postgresql_service_name }}"
+  register: postgresql_service_check
+  changed_when: false
+  failed_when: postgresql_service_check.stdout.strip() != 'active'
+
+- name: Validate PostgreSQL is listening on the configured port
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ postgresql_port }}"
+    timeout: 30
+
+- name: Validate PostgreSQL server version
+  ansible.builtin.command:
+    cmd: "{{ postgresql_bin_dir }}/psql --version"
+  register: postgresql_version_check
+  changed_when: false
+  failed_when:
+    - postgresql_version_check.rc != 0
+    - "'{{ postgresql_version }}.' not in postgresql_version_check.stdout"
+
+- name: Validate configured database
+  community.postgresql.postgresql_query:
+    query: "SELECT datname FROM pg_database WHERE datname = %(database)s"
+    db: postgres
+    named_args:
+      database: "{{ postgresql_database_name }}"
+  register: postgresql_validation_query
+  become: true
+  become_user: postgres
+  changed_when: false
+
+- name: Validate effective PostgreSQL configuration
+  community.postgresql.postgresql_query:
+    query: |
+      SELECT current_setting('port')::int AS port,
+             current_setting('listen_addresses') AS listen_addresses,
+             current_setting('timezone') AS timezone,
+             current_setting('logging_collector') AS logging_collector;
+    db: postgres
+  register: postgresql_configuration_validation
+  become: true
+  become_user: postgres
+  changed_when: false
+
+- name: Assert effective PostgreSQL configuration
+  ansible.builtin.assert:
+    that:
+      - postgresql_configuration_validation.query_result[0].port | int == postgresql_port | int
+      - postgresql_configuration_validation.query_result[0].listen_addresses == postgresql_listen_addresses
+      - postgresql_configuration_validation.query_result[0].timezone == postgresql_timezone
+      - postgresql_configuration_validation.query_result[0].logging_collector == postgresql_logging_collector
+
+- name: Validate configured database exists
+  ansible.builtin.assert:
+    that:
+      - postgresql_validation_query.query_result[0] | length == 1
+    fail_msg: "Configured database {{ postgresql_database_name }} does not exist."
+  when: postgresql_create_database
+
+- name: Validate configured users
+  community.postgresql.postgresql_query:
+    query: "SELECT rolname, rolcanlogin, rolsuper, rolreplication FROM pg_roles WHERE rolname = %(username)s"
+    db: postgres
+    named_args:
+      username: "{{ postgresql_debezium_user if postgresql_create_debezium_user else postgresql_sink_user }}"
+  register: postgresql_user_validation_query
+  become: true
+  become_user: postgres
+  changed_when: false
+  when: postgresql_create_debezium_user or postgresql_create_sink_user
+
+- name: Assert configured user exists
+  ansible.builtin.assert:
+    that:
+      - postgresql_user_validation_query.query_result | length == 1
+  when: postgresql_create_debezium_user or postgresql_create_sink_user
+
+- name: Assert configured application user privileges
+  ansible.builtin.assert:
+    that:
+      - postgresql_user_validation_query.query_result[0].rolcanlogin
+      - not postgresql_user_validation_query.query_result[0].rolsuper
+      - (not postgresql_create_debezium_user or postgresql_user_validation_query.query_result[0].rolreplication)
+      - (not postgresql_create_sink_user or not postgresql_user_validation_query.query_result[0].rolreplication)
+  when: postgresql_create_debezium_user or postgresql_create_sink_user
+
+- name: Validate logical replication settings
+  community.postgresql.postgresql_query:
+    query: |
+      SELECT current_setting('wal_level') AS wal_level,
+             current_setting('max_wal_senders')::int AS max_wal_senders,
+             current_setting('max_replication_slots')::int AS max_replication_slots;
+    db: postgres
+  register: postgresql_replication_validation
+  become: true
+  become_user: postgres
+  changed_when: false
+  when: postgresql_enable_logical_replication
+
+- name: Assert logical replication settings are enabled
+  ansible.builtin.assert:
+    that:
+      - postgresql_replication_validation.query_result[0].wal_level == 'logical'
+      - postgresql_replication_validation.query_result[0].max_wal_senders | int > 0
+      - postgresql_replication_validation.query_result[0].max_replication_slots | int > 0
+  when: postgresql_enable_logical_replication
